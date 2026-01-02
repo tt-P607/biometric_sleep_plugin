@@ -91,8 +91,9 @@ class SleepStateManager:
     def _init_daily_schedule(self):
         """初始化每日作息"""
         now = datetime.now()
-        start_str = self.config.get("basic.start_time", "23:30")
-        offset = self.config.get("basic.random_offset", 30)
+        basic_config = self.config.get("basic", {})
+        start_str = basic_config.get("start_time", "23:30")
+        offset = basic_config.get("random_offset", 30)
         
         try:
             h, m = map(int, start_str.split(":"))
@@ -117,7 +118,8 @@ class SleepStateManager:
         if start_time is None:
             return SleepState.AWAKE
 
-        end_str = self.config.get("basic.end_time", "07:30")
+        basic_config = self.config.get("basic", {})
+        end_str = basic_config.get("end_time", "07:30")
         h_end, m_end = map(int, end_str.split(":"))
         
         # 构造结束时间
@@ -172,12 +174,13 @@ class SleepStateManager:
         self.last_active_time = now
         
         # 如果快到入睡时间了，且有有效交互，尝试延时
+        drowsy_config = self.config.get("drowsy", {})
         if self.target_sleep_time and now >= self.target_sleep_time - timedelta(minutes=10):
-            max_delay = self.config.get("drowsy.max_delay_count", 3)
+            max_delay = drowsy_config.get("max_delay_count", 3)
             if is_effective and self.delay_count < max_delay:
                 self.state = SleepState.DROWSY
                 self.delay_count += 1
-                delay_min = self.config.get("drowsy.delay_duration", 15)
+                delay_min = drowsy_config.get("delay_duration", 15)
                 self.target_sleep_time += timedelta(minutes=delay_min)
                 logger.info(f"[SleepManager] 触发延时入睡，次数: {self.delay_count}/{max_delay}, 新入睡时间: {self.target_sleep_time.strftime('%H:%M')}")
                 self._save_state()
@@ -192,7 +195,8 @@ class SleepStateManager:
         获取指定会话的当前唤醒度（应用衰减后）
         """
         now = datetime.now()
-        decay_rate = self.config.get("sleeping.decay_rate", 5.0)
+        sleeping_config = self.config.get("sleeping", {})
+        decay_rate = sleeping_config.get("decay_rate", 5.0)
         
         if session_id not in self.wake_values:
             return 0.0
@@ -212,7 +216,8 @@ class SleepStateManager:
         
         规则：唤醒度 >= 阈值 时被吵醒
         """
-        threshold = self.config.get("sleeping.wake_threshold", 50.0)
+        sleeping_config = self.config.get("sleeping", {})
+        threshold = sleeping_config.get("wake_threshold", 50.0)
         current_val = self.get_wake_value(session_id)
         return current_val >= threshold
 
@@ -226,9 +231,10 @@ class SleepStateManager:
         3. 判断是否达到阈值
         """
         now = datetime.now()
-        threshold = self.config.get("sleeping.wake_threshold", 50.0)
-        increment = self.config.get("sleeping.wake_increment", 20.0)
-        max_val = self.config.get("sleeping.wake_max", 80.0)
+        sleeping_config = self.config.get("sleeping", {})
+        threshold = sleeping_config.get("wake_threshold", 50.0)
+        increment = sleeping_config.get("wake_increment", 20.0)
+        max_val = sleeping_config.get("wake_max", 80.0)
         
         # 获取当前值（已应用衰减）
         current_val = self.get_wake_value(session_id)
@@ -252,8 +258,9 @@ class SleepStateManager:
 
     def is_ignored(self, user_id: str, group_id: Optional[str] = None) -> bool:
         """检查是否在忽略名单中"""
-        ignored_ids = self.config.get("filter.ignored_ids", [])
-        mode = self.config.get("filter.mode", "blacklist")
+        filter_config = self.config.get("filter", {})
+        ignored_ids = filter_config.get("ignored_ids", [])
+        mode = filter_config.get("mode", "blacklist")
         
         target_ids = [user_id]
         if group_id:

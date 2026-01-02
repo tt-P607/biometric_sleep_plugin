@@ -58,8 +58,8 @@ class SleepStatusPrompt(BasePrompt):
             logger.debug("[SleepPrompt] 提示词注入已禁用")
             return ""
 
-        # 获取 session_id
-        session_id = self._extract_session_id()
+        # 获取 session_id（异步方式，从 ChatStream 获取 group_id）
+        session_id = await self._extract_session_id_async()
         
         # 获取当前状态
         state = self.manager.get_current_state(session_id)
@@ -76,8 +76,16 @@ class SleepStatusPrompt(BasePrompt):
         logger.debug("[SleepPrompt] 无需注入提示词（AWAKE状态）")
         return ""
     
-    def _extract_session_id(self) -> str | None:
-        """从 params 中提取 session_id"""
+    async def _extract_session_id_async(self) -> str | None:
+        """从 params 中提取 session_id（异步版本，支持从 ChatStream 获取 group_id）
+        
+        注意：session_id 必须与 sleep_interceptor 中使用的格式一致：
+        - 群聊: group_{group_id}（使用纯数字群号）
+        - 私聊: private_{user_id}（使用纯数字用户ID）
+        
+        由于 PromptParameters 中没有 group_id 字段，需要通过 chat_id（stream_id）
+        查询 ChatStream 来获取真正的 group_id。
+        """
         session_id = None
         
         params = self.params
@@ -97,18 +105,40 @@ class SleepStatusPrompt(BasePrompt):
             chat_id = getattr(params, "chat_id", None)
             is_group_chat = getattr(params, "is_group_chat", False)
 
-        # 构建 session_id
+        group_id = None
+        
+        # 尝试从 ChatStream 获取 group_id
+        if chat_id and is_group_chat:
+            try:
+                from src.chat.message_receive.chat_stream import get_chat_manager
+                chat_manager = get_chat_manager()
+                chat_stream = await chat_manager.get_stream(chat_id)
+                if chat_stream and chat_stream.group_info:
+                    group_id = chat_stream.group_info.group_id
+                    logger.debug(f"[SleepPrompt] 从 ChatStream 获取 group_id: {group_id}")
+            except Exception as e:
+                logger.warning(f"[SleepPrompt] 无法从 ChatStream 获取 group_id: {e}")
+
+        # 构建 session_id（必须与 sleep_interceptor 格式一致）
         if is_group_chat:
-            if chat_id:
-                session_id = chat_id if chat_id.startswith("group_") else f"group_{chat_id}"
+            # 优先使用从 ChatStream 获取的 group_id
+            if group_id:
+                session_id = f"group_{group_id}"
             elif user_id:
                 session_id = f"group_unknown_{user_id}"
+            else:
+                logger.warning(f"[SleepPrompt] 群聊但无法获取 group_id，chat_id={chat_id}")
         else:
+            # 私聊使用 user_id
             if user_id:
                 session_id = f"private_{user_id}"
             elif chat_id:
-                session_id = chat_id if chat_id.startswith("private_") else f"private_{chat_id}"
+                if chat_id.startswith("private_"):
+                    session_id = chat_id
+                else:
+                    session_id = f"private_{chat_id}"
 
+        logger.info(f"[SleepPrompt] 提取 session_id: {session_id} (group_id={group_id}, user_id={user_id}, chat_id={chat_id})")
         return session_id
     
     def _select_prompt(self, state: SleepState, session_id: str | None) -> str | None:
@@ -117,8 +147,11 @@ class SleepStatusPrompt(BasePrompt):
         
         - AWAKE: 无提示词
         - DROWSY: 困倦提示词
-        - SLEEPING + 唤醒度 < 阈值: 睡眠提示词
-        - SLEEPING + 唤醒度 >= 阈值: 被吵醒提示词
+        - SLEEPING: 统一使用被吵醒提示词（因为消息能到达这里说明已经被放行了）
+        
+        简化逻辑：如果消息能够触发提示词注入，说明拦截器已经放行了这条消息，
+        也就意味着要么不在睡眠时间，要么已经被吵醒了。所以 SLEEPING 状态下
+        直接使用 woken_prompt 即可。
         """
         if state == SleepState.AWAKE:
             return None
@@ -129,14 +162,10 @@ class SleepStatusPrompt(BasePrompt):
             return prompt
         
         if state == SleepState.SLEEPING:
-            # 判断是否处于被吵醒状态
-            if session_id and self.manager.is_woken(session_id):
-                prompt = self.get_config('prompt.woken_prompt')
-                logger.debug(f"[SleepPrompt] 状态=SLEEPING(被吵醒), 返回被吵醒提示词")
-                return prompt
-            else:
-                prompt = self.get_config('prompt.sleeping_prompt')
-                logger.debug(f"[SleepPrompt] 状态=SLEEPING, 返回睡眠提示词")
-                return prompt
+            # 简化逻辑：消息能到达这里说明拦截器已经放行，即已被吵醒
+            # 直接使用 woken_prompt
+            prompt = self.get_config('prompt.woken_prompt')
+            logger.info(f"[SleepPrompt] 状态=SLEEPING(消息被放行说明已吵醒), 返回被吵醒提示词")
+            return prompt
         
         return None

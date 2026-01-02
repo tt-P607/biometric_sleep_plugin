@@ -9,10 +9,15 @@ Biometric Sleep System - 事件拦截器 v2
 关键设计：
 - 被拦截的消息仍会存入数据库（保留历史记录）
 - 只是阻止消息触发后续的聊天流程
+
+提及类型说明：
+- 弱提及（mention_type=1）：消息文本包含机器人名字/别名，不触发唤醒
+- 强提及（mention_type=2）：真正的@/回复/私聊，触发唤醒
 """
 
 from typing import Any
 
+from src.chat.utils.utils import is_mentioned_bot_in_message
 from src.common.logger import get_logger
 from src.plugin_system import BaseEventHandler, EventType
 
@@ -119,15 +124,54 @@ class SleepInterceptor(BaseEventHandler):
         message_type = msg_dict.get("message_type", "")
         is_private = (message_type == "private") or (chat_platform == "private") or (group_id is None)
         
-        # 检查是否被 @ 或回复
-        is_at_me = msg_dict.get("is_at", False) or msg_dict.get("is_mentioned", False)
+        # 检查是否被强提及（真正的@自己/回复自己），需要精确判断
+        # 强提及: @机器人（精确匹配QQ号）、回复消息
+        # 弱提及: 消息文本包含机器人名字/别名（不应触发唤醒）
+        #
+        # 注意：不使用 is_mentioned_bot_in_message 函数，因为它有"祖传问题"——
+        # 当消息对象已有 is_mentioned=True 时，会直接返回 mention_type=2，
+        # 不区分是强提及还是弱提及。所以这里自己实现精确判断。
+        is_strong_mention = False
         
-        if not is_at_me and not is_private:
-            raw_message = msg_dict.get("display_message") or msg_dict.get("raw_message") or ""
-            if "reply_to" in msg_dict and msg_dict["reply_to"]:
-                is_at_me = True
-            elif "[CQ:reply,id=" in raw_message:
-                is_at_me = True
+        # 获取机器人QQ号，用于精确匹配
+        from src.config.config import global_config
+        bot_qq = str(global_config.bot.qq_account) if global_config else ""
+        
+        # 获取消息文本
+        processed_text = msg_dict.get("processed_plain_text") or msg_dict.get("display_message") or ""
+        
+        # 方法1: 检查 processed_plain_text 中是否@了机器人
+        # 格式: @<昵称:QQ号>，例如 @<爱莉希雅:3910007334>
+        if bot_qq:
+            import re
+            at_pattern = rf"@<[^>]+:{bot_qq}>"
+            if re.search(at_pattern, processed_text):
+                is_strong_mention = True
+                logger.info(f"[SleepInterceptor] 检测到@机器人 (匹配: {at_pattern})")
+        
+        # 方法2: 检查是否是回复机器人的消息
+        # 格式: [回复 xxx(QQ号)：xxx]，说：xxx
+        if not is_strong_mention and bot_qq:
+            import re
+            reply_pattern = rf"\[回复.*?\({bot_qq}\).*?\]"
+            reply_pattern2 = rf"\[回复<[^>]+:{bot_qq}>.*?\]"
+            if re.search(reply_pattern, processed_text) or re.search(reply_pattern2, processed_text):
+                is_strong_mention = True
+                logger.info(f"[SleepInterceptor] 检测到回复机器人的消息")
+        
+        # 方法3: 检查 reply_to 字段并验证是否回复的是机器人
+        # 暂时不使用这个方法，因为需要查询数据库确认原消息发送者
+        # if not is_strong_mention and "reply_to" in msg_dict and msg_dict["reply_to"]:
+        #     pass
+        
+        # 兼容旧的 CQ 码格式
+        if not is_strong_mention and not is_private:
+            if "[CQ:reply,id=" in processed_text:
+                is_strong_mention = True
+                logger.info(f"[SleepInterceptor] 检测到CQ码回复")
+        
+        # 调试日志
+        logger.debug(f"[SleepInterceptor] 强提及判断: is_strong_mention={is_strong_mention}, processed_text={processed_text[:100] if len(processed_text) > 100 else processed_text}")
 
         # 白名单/黑名单检查
         if self.manager.is_ignored(user_id, group_id):
@@ -137,10 +181,11 @@ class SleepInterceptor(BaseEventHandler):
         session_id = f"group_{group_id}" if group_id else f"private_{user_id}"
         state = self.manager.get_current_state(session_id)
 
-        # 有效交互 = 私聊 或 @消息
-        is_effective = is_private or is_at_me
+        # 有效交互 = 私聊 或 强提及（真正的@/回复）
+        # 注意：弱提及（名字匹配）不算有效交互，不会累计唤醒度
+        is_effective = is_private or is_strong_mention
         
-        logger.debug(f"[SleepInterceptor] session={session_id}, state={state}, is_private={is_private}, is_at={is_at_me}, is_effective={is_effective}")
+        logger.debug(f"[SleepInterceptor] session={session_id}, state={state}, is_private={is_private}, is_strong_mention={is_strong_mention}, is_effective={is_effective}")
 
         # ========== 状态处理 ==========
         
