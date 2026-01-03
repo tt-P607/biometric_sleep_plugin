@@ -59,8 +59,15 @@ class SleepStatusPrompt(BasePrompt):
             return ""
 
         # 获取 session_id（异步方式，从 ChatStream 获取 group_id）
-        session_id = await self._extract_session_id_async()
+        session_id, user_id, group_id = await self._extract_session_id_async()
         
+        # 检查是否在忽略名单中
+        # 如果用户/群组在忽略名单中（例如黑名单），则不注入任何睡眠相关的提示词
+        # 这样即使全局状态是 SLEEPING，被忽略的用户也不会收到睡眠提示词
+        if self.manager.is_ignored(user_id or "", group_id):
+            logger.debug(f"[SleepPrompt] 用户/群组在忽略名单中，跳过提示词注入: user_id={user_id}, group_id={group_id}")
+            return ""
+
         # 获取当前状态
         state = self.manager.get_current_state(session_id)
         
@@ -76,15 +83,11 @@ class SleepStatusPrompt(BasePrompt):
         logger.debug("[SleepPrompt] 无需注入提示词（AWAKE状态）")
         return ""
     
-    async def _extract_session_id_async(self) -> str | None:
-        """从 params 中提取 session_id（异步版本，支持从 ChatStream 获取 group_id）
+    async def _extract_session_id_async(self) -> tuple[str | None, str | None, str | None]:
+        """从 params 中提取 session_id、user_id 和 group_id
         
-        注意：session_id 必须与 sleep_interceptor 中使用的格式一致：
-        - 群聊: group_{group_id}（使用纯数字群号）
-        - 私聊: private_{user_id}（使用纯数字用户ID）
-        
-        由于 PromptParameters 中没有 group_id 字段，需要通过 chat_id（stream_id）
-        查询 ChatStream 来获取真正的 group_id。
+        Returns:
+            tuple: (session_id, user_id, group_id)
         """
         session_id = None
         
@@ -93,7 +96,7 @@ class SleepStatusPrompt(BasePrompt):
             params = getattr(self, "context", {})
 
         if not params:
-            return None
+            return None, None, None
 
         # 兼容字典和对象访问
         if isinstance(params, dict):
@@ -127,7 +130,7 @@ class SleepStatusPrompt(BasePrompt):
             elif user_id:
                 session_id = f"group_unknown_{user_id}"
             else:
-                logger.warning(f"[SleepPrompt] 群聊但无法获取 group_id，chat_id={chat_id}")
+                logger.debug(f"[SleepPrompt] 群聊但无法获取 group_id，chat_id={chat_id}")
         else:
             # 私聊使用 user_id
             if user_id:
@@ -140,10 +143,12 @@ class SleepStatusPrompt(BasePrompt):
 
         # 只在 session_id 为 None 时记录警告，其他情况用 debug
         if session_id is None:
-            logger.debug(f"[SleepPrompt] session_id=None (group_id={group_id}, user_id={user_id}, chat_id={chat_id})，将使用简化逻辑")
+            # 降低日志级别，避免干扰
+            logger.debug(f"[SleepPrompt] session_id=None (group_id={group_id}, user_id={user_id}, chat_id={chat_id})")
         else:
             logger.debug(f"[SleepPrompt] 提取 session_id: {session_id}")
-        return session_id
+            
+        return session_id, user_id, group_id
     
     def _select_prompt(self, state: SleepState, session_id: str | None) -> str | None:
         """
