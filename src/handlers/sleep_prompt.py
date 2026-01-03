@@ -138,7 +138,11 @@ class SleepStatusPrompt(BasePrompt):
                 else:
                     session_id = f"private_{chat_id}"
 
-        logger.info(f"[SleepPrompt] 提取 session_id: {session_id} (group_id={group_id}, user_id={user_id}, chat_id={chat_id})")
+        # 只在 session_id 为 None 时记录警告，其他情况用 debug
+        if session_id is None:
+            logger.debug(f"[SleepPrompt] session_id=None (group_id={group_id}, user_id={user_id}, chat_id={chat_id})，将使用简化逻辑")
+        else:
+            logger.debug(f"[SleepPrompt] 提取 session_id: {session_id}")
         return session_id
     
     def _select_prompt(self, state: SleepState, session_id: str | None) -> str | None:
